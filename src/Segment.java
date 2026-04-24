@@ -46,6 +46,7 @@ public final class Segment {
         if (payload.length > MAX_LENGTH) {
             throw new IllegalArgumentException("Payload too large for 29-bit length field");
         }
+        
         return new Segment(seqNum, ackNum, timestamp, payload.length, syn, fin, ack, (short) 0, payload);
     }
 
@@ -61,6 +62,7 @@ public final class Segment {
         byte[] raw = buffer.array();
         short computedChecksum = ChecksumUtil.compute(raw);
         ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN).putShort(22, computedChecksum);
+        
         return raw;
     }
 
@@ -105,9 +107,11 @@ public final class Segment {
         if (syn) {
             consumed += 1;
         }
+       
         if (fin) {
             consumed += 1;
         }
+        
         return consumed;
     }
 
@@ -121,15 +125,19 @@ public final class Segment {
             throw new IllegalArgumentException("Invalid payload length");
         }
         int encoded = (length << 3);
+        
         if (syn) {
             encoded |= FLAG_SYN;
         }
+        
         if (fin) {
             encoded |= FLAG_FIN;
         }
+        
         if (ack) {
             encoded |= FLAG_ACK;
         }
+        
         return encoded;
     }
 

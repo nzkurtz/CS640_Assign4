@@ -1,4 +1,3 @@
-import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -36,24 +35,29 @@ public final class TCPend {
 
     private static Map<String, String> parseArgs(String[] args) {
         Map<String, String> parsed = new HashMap<>();
+        
         for (int i = 0; i < args.length; i++) {
             String key = args[i];
             if (!key.startsWith("-")) {
                 throw new IllegalArgumentException("Unexpected argument: " + key);
             }
+            
             if (i + 1 >= args.length) {
                 throw new IllegalArgumentException("Missing value for " + key);
             }
             parsed.put(key, args[++i]);
         }
+        
         return parsed;
     }
 
     private static String require(Map<String, String> parsed, String key) {
         String value = parsed.get(key);
+        
         if (value == null) {
             throw new IllegalArgumentException("Missing required argument " + key);
         }
+        
         return value;
     }
 

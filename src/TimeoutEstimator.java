@@ -15,10 +15,12 @@ public final class TimeoutEstimator {
 
     public void updateFromAck(int ackNumber, long echoedTimestamp, long nowNano) {
         long sample = Math.max(1L, nowNano - echoedTimestamp);
+        
         if (ertt < 0.0 || ackNumber == 0) {
             ertt = sample;
             edev = 0.0;
             timeoutNs = clamp((long) (2.0 * ertt));
+
             return;
         }
 
@@ -33,9 +35,11 @@ public final class TimeoutEstimator {
         if (value < MIN_TIMEOUT_NS) {
             return MIN_TIMEOUT_NS;
         }
+        
         if (value > MAX_TIMEOUT_NS) {
             return MAX_TIMEOUT_NS;
         }
+       
         return value;
     }
 }

@@ -94,6 +94,7 @@ public final class Receiver {
                     if (closeAttempts >= MAX_RETRANSMISSIONS) {
                         throw new IOException("Did not receive final ACK for receiver FIN");
                     }
+                    stats.incrementRetransmissions();
                     sendSegment(socket, peer, finAck);
                     closeAttempts += 1;
                     closeDeadline = System.nanoTime() + 5_000_000_000L;
@@ -126,6 +127,7 @@ public final class Receiver {
                         if (closeAttempts >= MAX_RETRANSMISSIONS) {
                             throw new IOException("Did not receive final ACK for receiver FIN");
                         }
+                        stats.incrementRetransmissions();
                         sendSegment(socket, peer, finAck);
                         closeAttempts += 1;
                         closeDeadline = System.nanoTime() + 5_000_000_000L;
@@ -170,6 +172,7 @@ public final class Receiver {
                     if (!buffer.containsKey(segment.seqNum) && buffer.size() < sws * 4) {
                         buffer.put(segment.seqNum, segment);
                     }
+                    lastAckTimestamp = segment.timestamp;
                     stats.incrementOutOfSequence();
                     Segment dupAck = Segment.create(localSeq, expectedSeq, lastAckTimestamp, false, false, true, null);
                     sendSegment(socket, peer, dupAck);

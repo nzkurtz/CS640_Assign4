@@ -31,12 +31,22 @@ public final class Stats {
     }
 
     public String summaryLine() {
-        return String.format("%dB %d %d %d %d %d",
-                dataBytes,
+        return String.format("%s %d %d %d %d %d",
+                formatDataBytes(dataBytes),
                 packets,
                 outOfSequence,
                 checksumDiscarded,
                 retransmissions,
                 duplicateAcks);
+    }
+
+    private static String formatDataBytes(long bytes) {
+        if (bytes >= 1024L * 1024L) {
+            return (bytes / (1024L * 1024L)) + "Mb";
+        } else if (bytes >= 1024L) {
+            return (bytes / 1024L) + "Kb";
+        }
+        
+        return bytes + "B";
     }
 }

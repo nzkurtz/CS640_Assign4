@@ -50,7 +50,7 @@ public final class Sender {
             sendFile(socket, remoteSocketAddress, segments, state);
             int finSeq = state.localSeq;
             Segment fin = Segment.create(finSeq, state.peerExpectedSeq, System.nanoTime(), false, true, false, null);
-            performClose(socket, remoteSocketAddress, fin, state);
+            performClose(socket, remoteSocketAddress, fin);
         }
 
         System.out.println(stats.summaryLine());
@@ -72,6 +72,7 @@ public final class Sender {
                 if (response == null) {
                     break;
                 }
+                
                 if (!response.syn || !response.ack || response.ackNum != 1) {
                     continue;
                 }
@@ -79,6 +80,7 @@ public final class Sender {
                 timeoutEstimator.updateFromAck(response.ackNum, response.timestamp, System.nanoTime());
                 Segment finalAck = Segment.create(1, peerExpectedSeq, System.nanoTime(), false, false, true, null);
                 sendSegment(socket, remote, finalAck);
+                
                 return new ConnectionState(1, peerExpectedSeq);
             }
 
@@ -100,6 +102,7 @@ public final class Sender {
             offset += length;
             seq += length;
         }
+        
         return segments;
     }
 
@@ -130,9 +133,11 @@ public final class Sender {
             if (ack != null) {
                 handleAck(socket, remote, ack, inFlight, state);
             } else {
-                InFlightSegment expired = firstExpired(inFlight);
-                if (expired != null) {
-                    retransmit(socket, remote, expired, state.peerExpectedSeq);
+                long now = System.nanoTime();
+                for (InFlightSegment pending : inFlight.values()) {
+                    if (pending.deadlineNanos <= now) {
+                        retransmit(socket, remote, pending, state.peerExpectedSeq);
+                    }
                 }
             }
         }
@@ -158,6 +163,7 @@ public final class Sender {
         while (iterator.hasNext()) {
             Map.Entry<Integer, InFlightSegment> entry = iterator.next();
             int endExclusive = entry.getKey() + entry.getValue().segment.length;
+            
             if (ackNumber >= endExclusive) {
                 iterator.remove();
                 advanced = true;
@@ -169,6 +175,7 @@ public final class Sender {
             state.sendBase = ackNumber;
             state.lastAckNumber = ackNumber;
             state.duplicateAckStreak = 0;
+            
             return;
         }
 
@@ -177,6 +184,7 @@ public final class Sender {
             stats.incrementDuplicateAcks();
             if (state.duplicateAckStreak >= 3) {
                 InFlightSegment missing = inFlight.get(ackNumber);
+                
                 if (missing != null) {
                     retransmit(socket, remote, missing, state.peerExpectedSeq);
                     state.duplicateAckStreak = 0;
@@ -214,20 +222,11 @@ public final class Sender {
         for (InFlightSegment pending : inFlight.values()) {
             earliest = Math.min(earliest, pending.deadlineNanos);
         }
+        
         return earliest;
     }
 
-    private InFlightSegment firstExpired(Map<Integer, InFlightSegment> inFlight) {
-        long now = System.nanoTime();
-        for (InFlightSegment pending : inFlight.values()) {
-            if (pending.deadlineNanos <= now) {
-                return pending;
-            }
-        }
-        return null;
-    }
-
-    private void performClose(DatagramSocket socket, InetSocketAddress remote, Segment fin, ConnectionState state)
+    private void performClose(DatagramSocket socket, InetSocketAddress remote, Segment fin)
             throws IOException {
         int attempts = 0;
         int finSeq = fin.seqNum;
@@ -244,6 +243,7 @@ public final class Sender {
                 if (response == null) {
                     break;
                 }
+                
                 if (response.fin && response.ack && response.ackNum == finSeq + 1) {
                     int peerFinalSeq = response.seqNum + response.consumedSequenceSpace();
                     Segment finalAck = Segment.create(finSeq + 1, peerFinalSeq, System.nanoTime(), false, false, true, null);
@@ -269,12 +269,14 @@ public final class Sender {
     private Segment receiveSegmentWithDeadline(DatagramSocket socket, long deadlineNanos) throws IOException {
         while (true) {
             long remainingNs = deadlineNanos - System.nanoTime();
+            
             if (remainingNs <= 0) {
                 return null;
             }
             int timeoutMs = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, (remainingNs + 999_999L) / 1_000_000L));
             socket.setSoTimeout(timeoutMs);
             DatagramPacket packet = new DatagramPacket(new byte[RECEIVE_BUFFER_SIZE], RECEIVE_BUFFER_SIZE);
+            
             try {
                 socket.receive(packet);
             } catch (java.net.SocketTimeoutException e) {
@@ -294,6 +296,7 @@ public final class Sender {
             }
             logger.logReceive(segment);
             stats.incrementPackets();
+            
             return segment;
         }
     }
