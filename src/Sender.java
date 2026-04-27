@@ -192,7 +192,7 @@ public final class Sender {
             }
         } else {
             state.lastAckNumber = ackNumber;
-            state.duplicateAckStreak = 1;
+            state.duplicateAckStreak = 0;
         }
     }
 

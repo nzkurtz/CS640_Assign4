@@ -12,8 +12,8 @@ public final class TCPend {
         int sws = requireInt(parsed, "-c");
         String fileName = require(parsed, "-f");
 
-        if (mtu <= 0 || mtu > 1430) {
-            throw new IllegalArgumentException("MTU must be between 1 and 1430 for the expected test environment");
+        if (mtu <= 0) {
+            throw new IllegalArgumentException("MTU must be positive");
         }
         if (sws <= 0) {
             throw new IllegalArgumentException("Sliding window size must be positive");

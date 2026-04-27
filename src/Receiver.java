@@ -109,6 +109,13 @@ public final class Receiver {
                 }
 
                 if (segment.fin) {
+                    while (true) {
+                        Segment buffered = buffer.remove(expectedSeq);
+                        if (buffered == null) break;
+                        out.write(buffered.data);
+                        stats.addDataBytes(buffered.length);
+                        expectedSeq += buffered.length;
+                    }
                     if (segment.seqNum == expectedSeq) {
                         expectedSeq += 1;
                     }
@@ -144,6 +151,7 @@ public final class Receiver {
                 }
 
                 if (segment.seqNum < expectedSeq) {
+                    lastAckTimestamp = segment.timestamp;
                     stats.incrementOutOfSequence();
                     Segment dupAck = Segment.create(localSeq, expectedSeq, lastAckTimestamp, false, false, true, null);
                     sendSegment(socket, peer, dupAck);
@@ -165,11 +173,12 @@ public final class Receiver {
                         stats.addDataBytes(buffered.length);
                         expectedSeq += buffered.length;
                     }
+                    lastAckTimestamp = segment.timestamp;
 
                     Segment ack = Segment.create(localSeq, expectedSeq, segment.timestamp, false, false, true, null);
                     sendSegment(socket, peer, ack);
                 } else {
-                    if (!buffer.containsKey(segment.seqNum) && buffer.size() < sws * 4) {
+                    if (!buffer.containsKey(segment.seqNum) && buffer.size() < sws) {
                         buffer.put(segment.seqNum, segment);
                     }
                     lastAckTimestamp = segment.timestamp;

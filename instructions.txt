@@ -1,0 +1,176 @@
+For this assignment, you have to implement a Transmission Control Protocol (TCP) which should incorporate
+only the following features on top of the unreliable UDP sockets:
+• Reliability (meaning proper re-transmissions in the event of packet losses / corruption)
+• Data Integrity (with checksums)
+• Opening and Closing Connections (SYN and FIN)
+• Optimizations (fast retransmit on 3 or more duplicate ACKs)
+Notably, you do not need to have adjusting window size, as that will be provided to you as a command line
+parameter, but you still must have the retransmit behavior expected when there is no response or duplicate
+ACKs.
+We will test the TCP version you have implemented by transferring files from the client to the server using
+your implementation under different network conditions.
+2.1 Protocol Specification
+The various components of the protocol that you have to develop are explained step by step. Please strictly
+adhere to the specifications.
+2.1.1 Message Format
+All data are sent using UDP. You have to communicate all the transport layer information in the data
+portion of a UDP packet. To support reliability, hosts will implement a variant of the Go-Back-N protocol.
+The sender will tag each outgoing message with an increasing sequence number. The receiver will use the
+sequence numbers to ensure that all messages have been received in the correct order. If a message is
+received out of order it will be stored in the receiver’s buffer (but not delivered to an application) and an
+acknowledgment corresponding to the last successful contiguous byte received will be retransmitted. The
+sender will maintain an acknowledgment timeout based on the round trip time of the link between the end
+hosts. If a duplicate acknowledgment is received or if the acknowledgment timeout expires the sender will
+resend the unacknowledged segment destined for the receiver. A one’s complement checksum (The detailed
+explanation is in later section) on the data part is used to enforce message integrity. See figure 4 for details.
+• Byte Sequence Number is incremented according to the bytes sent. It indicates the position of the
+first byte of the data in this segment.
+• Acknowledgment indicates the next byte expected in the reverse direction
+• Timestamp is derived from the System.nanoTime() function and is the time of data transmission (in
+nanoSeconds) which is 64 bits (or 8 bytes) long in size.
+• Length is the length of the data portion (in bytes) and please pay attention that the least three
+significant bits are used by flags. That means valid number of bits for the length field are only 29 bits
+(You will need to do bit manipulation to access and set these fields).
+• Three flags: S for SYN, A for ACK, and F for FIN.
+7
+Figure 4: Binary packet format
+Byte Sequence Number
+0 16 313029
+Acknowledgment
+Timestamp
+Length S F A
+All Zeros Checksum
+Data
+• Checksum is the one’s complement checksum computed over the entire packet with the checksum
+assumed zero in the input. See appendix A on how to calculate one’s complement checksum.
+2.1.2 Maximum Number of Retransmissions
+If unacknowledged messages remain in a host’s send buffer and no response from the destination has been
+received after multiple retransmission attempts, the sending host will stop trying to send the messages and
+report an error. This maximum is set to 16 by default.
+2.1.3 Maximum Transmission Unit
+Maximum Transmission Unit (MTU) determines the maximum size of payload that can be transmitted in
+one packet. So, in order to transfer a huge file, it needs to be divided into smaller chunks, the maximum size
+of each chunk being MTU. It is passed as a command line argument to the client and server during startup.
+2.1.4 Connection State and Peer Actions
+Suppose host A wants to send a message to host B. Assume, for now, that A has never sent a message to B
+(as will be clear, it does not matter if A has rebooted or has sent a message a long time ago, etc.).
+• Data Send Actions: A will send a data segment as governed by the size of the sliding congestion
+window. In this assignment, the congestion window is a configured parameter. A will include a
+monotonically increasing timestamp (See Section 2.2 on how to compute this timestamp) on the packet.
+If A thinks this is a new connection (because it has never communicated with B before, or because it
+has somehow lost the connection state to B), it will set the sequence number to 0. For each subsequent
+message, A will include a new timestamp on the packet and increment the sequence number by the
+number of bytes sent.
+• Receiver Actions
+Connection start and data transfer: If this is the first time B is communicating with A and has
+just received a segment with sequence number equal to zero, it creates a new connection state for A. For
+each segment received, B will send an acknowledgment to A. The acknowledgment packet has sequence
+number corresponding to the next expected byte. If no data is sent along with the acknowledgment,
+the length of this segment will be zero. Note data packets cannot have zero length. B also copies
+the timestamp field from the data segment into the corresponding ACK segment. Thus, A can use
+8
+this timestamp field in the acknowledgment to calculate the round trip time for segments (refer to our
+discussion in class on calculating round trip times).
+Retransmissions: For each packet sent, the sender must maintain a retransmission timer (the com-
+putation of the timer is described in the next section). Whenever a packet has not been ACKed before
+its retransmission timer goes off, it must be re-sent. There is a timer set for the re-transmissions as
+well — thus, if the re-transmission is not ACKed, the packet will be re-re-transmitted. Apart from
+timeout based retransmissions, the sender also uses three duplicate acknowledgments for the same
+sequence number as an indicator of loss and retransmits the corresponding lost segment. This is the
+“fast retransmit” approach.
+2.2 Timeout Computation
+The sender places the current time in the packet timestamp field of the message header. When a packet is
+acknowledged by the receiving client it will copy the packet timestamp into the acknowledged timestamp
+field. When the sender receives the acknowledgment it can subtract the acknowledgment timestamp from
+the current time to calculate the round trip time. If a client is sending a cumulative acknowledgment of
+several packets, the timestamp from the latest received packet which is causing this acknowledgment should
+be copied into the reply, in terms of time received. That is, if packet 4 arrives after packet 5, the cumulative
+acknowledgment up to packet 5 should include timestamp from packet 4.
+We will use a simple exponentially weighted average to compute the timeout.
+Before sending the first packet, the timeout value is, arbitrarily, set to 5 seconds. Assume the sender has
+just received an ack with sequence S and timestamp T. Let C be the current time at the sender and TO be
+the timeout time.
+if (S = 0)
+ERTT := (C - T)
+EDEV := 0
+TO := 2*ERTT
+else
+SRTT := (C - T)
+SDEV := |SRTT - ERTT|
+ERTT := a*ERTT + (1-a)*SRTT
+EDEV := b*EDEV + (1-b)*SDEV
+TO := ERTT + 4*EDEV
+The value of a is set to 0.875 and b is 0.75.
+Computing the sender timestamp: In the 64-bit timestamp field, the sender includes a monotonically in-
+creasing timestamp with granularity of one nanosecond. This can be obtained from the System.nanoTime()
+function.
+2.3 Host Commands/Output Format
+Feel free to create any additional files from the ones mentioned below. You are allowed to use the java.net
+package relating only to UDP packets.
+You will implement a java executable called TCPend. You will need a sender and receiver connection to start
+the file transfer. Command line arguments will indicate which host is the initiator of a TCP transfer. The
+sender TCPend must support the following options at startup:
+java TCPend -p <port> -s <remote IP> -a <remote port> -f <file name> -m <mtu> -c <sws>
+• port: port number at which the client will run
+• remote IP: the IP address of the remote peer (i.e. receiver). With the -s flag your program should
+operate in sending mode.
+9
+• remote port: the port at which the remote receiver is running
+• file name: the file to be sent
+• mtu: maximum transmission unit in bytes
+• sws: sliding window size in number of segments
+The remote receiver uses the following set of arguments:
+java TCPend -p <port> -m <mtu> -c <sws> -f <file name>
+• port: port number at which the receiver will listen at
+• file name: the path where the incoming file should be written
+• mtu: maximum transmission unit in bytes
+• sws: sliding window size in number of segments
+Host Output
+Each host should output the information about each segment that it sends and receives in the following
+format:
+<snd/rcv> <time> <flag-list> <seq-number> <number of bytes> <ack number>
+where flag list includes S for SYN, A for ACK, F for FIN and D for data. The following are valid output
+lines for a connection initiator that sends 112 bytes of data:
+snd 34.335 S - - - 0 0 0
+rcv 34.8 S A - - 0 0 1
+snd 34.81 - A - - 1 0 1
+snd 35.5 - A - D 1 56 1
+snd 35.6 - A - D 57 56 1
+rcv 36.2 - A - - 1 0 113
+snd 36.65 - - F - 113 0 1
+rcv 37.2 - A F - 1 0 114
+snd 37.3 - A - - 114 0 2
+At the end of the transfer, i.e., once the connection has been closed you should print the following statistics:
+- Amount of Data transferred/received
+- Number of packets sent/received
+- Number of out-of-sequence packets
+- Number of packets discarded due to incorrect checksum
+- Number of retransmissions
+- Number of duplicate acknowledgements
+All of these should be printed on a single line with just spaces between them in this order, for example:
+50Mb 50000 500 0 50 500
+3 Testing
+To test your implementation you could use a mininet virtual topology like you have been doing in the earlier
+assignments but modify the router implementation to drop packets with a given probability. E.g., drop 5%
+of the IP packets received. Then you could try sending the file from one mininet host to another (use xterm
+to open terminal windows on different mininet hosts) connected via the modified router and see if the file
+gets transferred correctly. Here is a sample router implementation of your assignment2 which drops roughly
+5% of the packets. Look at the end of forwardIPPacket() method inside Router.java. You can modify
+the drop rates for your testing. You can use the similar commands from assignment 2 to run it.
+To run it first start mininet using the following command:
+10
+sudo ./run_mininet.py topos/single_rt.topo -a
+Then start pox:
+./run_pox.sh
+Then start your virtual router that you’ve modified that will drop 5% of all the packets.
+java -jar VirtualNetwork.jar -v r1 -r rtable.r1 -a arp_cache
+Now open terminal windows on hosts h1 and h2 by typing xterm h1 h2 in mininet console. Navigate to
+the directory where with your TCP implementation and send a file from h1 to h2. If your implementation
+is correct, the file should be successfully transferred to h2 i.e., content should exactly match. In addition to
+visual inspection of the received file, you may also use checksum utilities such as sha256sum to verify that
+the files are indeed identical.
+Note that this assignment is more open ended than your previous assignments in this course. You have more
+freedom for your implementation methodology as long as you correctly meet the protocol defined above. To
+test, the TAs would try to transfer files of different sizes (small, medium, large) with different packet drop
+rates and would check if data transfer was correct. I.e., file received by the receiver should be identical to
+the one present at the sender.
