@@ -30,12 +30,12 @@ public class Sender {
     private long[] winTime;
     private int winCount = 0;
 
-    private int base;     // oldest unACKed seq
-    private int nextSeq;  // next seq to send
+    private int base;     
+    private int nextSeq;
     private int dupAckCount = 0;
     private int lastReceivedAckNum = -1;
     private int consecutiveRetrans = 0;
-    private int receiverSeq = 1; // receiver's next seq (after its SYN)
+    private int receiverSeq = 1; // receiver's next seq 
 
     public Sender(int localPort, String remoteHost, int remotePort,
                   String filename, int mtu, int sws) {
@@ -65,10 +65,6 @@ public class Sender {
         stats.print();
     }
 
-    // -------------------------------------------------------------------------
-    // Handshake
-    // -------------------------------------------------------------------------
-
     private void doSynHandshake() throws IOException {
         Segment syn = new Segment();
         syn.seqNum = 0;
@@ -91,13 +87,13 @@ public class Sender {
                 long now = System.nanoTime();
                 timeoutEst.update(0, resp.timestamp, now);
 
-                base = resp.ackNum;    // should be 1
-                nextSeq = resp.ackNum; // start data at seq 1
+                base = resp.ackNum;    
+                nextSeq = resp.ackNum;
 
                 // Send ACK for the SYN-ACK
                 Segment ackSeg = new Segment();
                 ackSeg.seqNum = base;
-                ackSeg.ackNum = resp.seqNum + 1; // receiver's SYN consumed 1 byte
+                ackSeg.ackNum = resp.seqNum + 1;
                 ackSeg.timestamp = System.nanoTime();
                 ackSeg.dataLen = 0;
                 ackSeg.ack = true;
@@ -107,11 +103,11 @@ public class Sender {
                 return;
             }
         }
-        throw new RuntimeException("SYN handshake failed after " + MAX_RETRANS + " retransmissions");
+        throw new RuntimeException("SYN handshake failed after: " + MAX_RETRANS + " retransmissions");
     }
 
     private void doFinHandshake() throws IOException {
-        int finSeq = 1 + fileData.length; // seq right after last data byte
+        int finSeq = 1 + fileData.length;
 
         Segment fin = new Segment();
         fin.seqNum = finSeq;
@@ -136,7 +132,7 @@ public class Sender {
                     finAck = resp;
                     break;
                 }
-                // Ignore other packets (stale ACKs etc.)
+                // Ignore other packets
             }
             if (finAck != null) break;
         }
@@ -155,15 +151,11 @@ public class Sender {
         sendSeg(lastAck);
     }
 
-    // -------------------------------------------------------------------------
-    // Data transfer
-    // -------------------------------------------------------------------------
-
     private void doDataTransfer() throws IOException {
-        int endSeq = 1 + fileData.length; // exclusive end / FIN seq
+        int endSeq = 1 + fileData.length;
 
         while (base < endSeq) {
-            // Fill window with new segments
+            // Fill window wth new segments
             while (winCount < sws && nextSeq < endSeq) {
                 int dataStart = nextSeq - 1;
                 int dataLen = Math.min(mtu, fileData.length - dataStart);
@@ -190,19 +182,18 @@ public class Sender {
 
             if (winCount == 0) break;
 
-            // Receive with deadline based on oldest in-flight send time
+            // Receive with deadline based on oldest send time
             long deadline = winTime[0] + timeoutEst.getNanos();
             Segment ack = recvUntil(deadline);
 
             if (ack == null) {
-                // Timeout: retransmit all in-flight
                 consecutiveRetrans++;
                 if (consecutiveRetrans > MAX_RETRANS) {
                     throw new RuntimeException("Max retransmissions exceeded");
                 }
                 retransmitAll();
             } else {
-                if (!ack.ack || ack.syn) continue; // ignore non-ACK and stale SYN-ACKs
+                if (!ack.ack || ack.syn) continue;
 
                 if (ack.ackNum > base) {
                     // Update timeout estimator only on new ACKs
@@ -221,12 +212,10 @@ public class Sender {
                     }
                     stats.dupAcks++;
                     if (dupAckCount == 3) {
-                        // Fast retransmit: only the oldest in-flight
                         resend(0);
                         stats.retransmissions++;
                     }
                 } else {
-                    // ackNum < base: stale, ignore
                 }
             }
         }
@@ -262,9 +251,6 @@ public class Sender {
         sendRaw(winBytes[idx], win[idx]);
     }
 
-    // -------------------------------------------------------------------------
-    // Send / Receive helpers
-    // -------------------------------------------------------------------------
 
     private void sendSeg(Segment seg) throws IOException {
         sendRaw(seg.toBytes(), seg);
@@ -277,10 +263,6 @@ public class Sender {
         stats.packetsSent++;
     }
 
-    /**
-     * Try to receive one well-formed segment. Returns null on bad checksum.
-     * Throws SocketTimeoutException if socket times out.
-     */
     private Segment recvOnce() throws IOException {
         byte[] buf = new byte[Segment.HEADER_SIZE + mtu + 64];
         DatagramPacket pkt = new DatagramPacket(buf, buf.length);
@@ -296,7 +278,6 @@ public class Sender {
         return seg;
     }
 
-    /** Receive a valid segment before deadlineNs. Returns null on timeout. */
     private Segment recvUntil(long deadlineNs) throws IOException {
         while (true) {
             long remaining = deadlineNs - System.nanoTime();
@@ -306,7 +287,7 @@ public class Sender {
             try {
                 Segment seg = recvOnce();
                 if (seg != null) return seg;
-                // Bad checksum: retry within deadline
+                // Bad checksum
             } catch (SocketTimeoutException e) {
                 return null;
             }

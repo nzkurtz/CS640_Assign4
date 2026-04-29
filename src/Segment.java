@@ -40,7 +40,8 @@ public class Segment {
         seg.syn = (lenFlags & 4) != 0;
         seg.fin = (lenFlags & 2) != 0;
         seg.ack = (lenFlags & 1) != 0;
-        buf.getShort(); // skip checksum
+        // skip checksum
+        buf.getShort(); 
         int dlen = len - HEADER_SIZE;
         if (dlen > 0) {
             seg.data = new byte[dlen];

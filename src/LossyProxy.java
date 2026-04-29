@@ -6,8 +6,6 @@ import java.util.Random;
  * UDP proxy that randomly drops packets in both directions.
  * Usage: java LossyProxy <listenPort> <destHost> <destPort> <dropRate> [seed]
  *
- * Example (10% loss, sender→proxy:5001, proxy→receiver:5002):
- *   java LossyProxy 5001 127.0.0.1 5002 0.10
  */
 public class LossyProxy {
 
@@ -27,9 +25,9 @@ public class LossyProxy {
         InetAddress destAddr = InetAddress.getByName(destHost);
         Random rng = new Random(seed);
 
-        // clientSocket: faces the sender
+        // clientSocket
         DatagramSocket clientSocket = new DatagramSocket(listenPort);
-        // serverSocket: faces the receiver (OS picks an ephemeral port)
+        // serverSocket
         DatagramSocket serverSocket = new DatagramSocket();
 
         System.err.printf("LossyProxy: listen=%d  dest=%s:%d  dropRate=%.0f%%  seed=%d%n",
@@ -38,7 +36,6 @@ public class LossyProxy {
         // Remember where the sender is so we can forward replies back
         final InetSocketAddress[] senderRef = {null};
 
-        // Thread: receiver → sender (reverse direction)
         Thread revThread = new Thread(() -> {
             byte[] buf = new byte[65535];
             while (true) {
@@ -66,7 +63,7 @@ public class LossyProxy {
         revThread.setDaemon(true);
         revThread.start();
 
-        // Main thread: sender → receiver (forward direction)
+        // Main thread: sender -> receiver
         byte[] buf = new byte[65535];
         while (true) {
             DatagramPacket pkt = new DatagramPacket(buf, buf.length);

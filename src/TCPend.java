@@ -19,10 +19,10 @@ public class TCPend {
         }
 
         if (remoteIP != null) {
-            // Sender mode
+            // Sender 
             new Sender(port, remoteIP, remotePort, filename, mtu, sws).run();
         } else {
-            // Receiver mode
+            // Receiver 
             new Receiver(port, filename, mtu, sws).run();
         }
     }

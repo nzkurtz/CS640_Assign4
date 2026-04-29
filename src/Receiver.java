@@ -28,36 +28,38 @@ public class Receiver {
 
     public void run() throws Exception {
         DatagramSocket socket = new DatagramSocket(localPort);
-        socket.setSoTimeout(0); // wait forever initially
+        // wait forever initially
+        socket.setSoTimeout(0); 
 
         try {
-            // Step 1: Wait for SYN
+            // Wait for SYN
             InetSocketAddress peer = null;
             Segment syn = null;
             while (syn == null) {
                 RecvResult r = recvFrom(socket);
-                if (r == null) continue; // bad checksum
+                // bad checksum
+                if (r == null) continue; 
                 if (r.seg.syn && !r.seg.ack && r.seg.seqNum == 0) {
                     syn = r.seg;
                     peer = r.peer;
                 }
             }
 
-            int expectedSeq = 1; // SYN consumed seq 0
-            int mySeq = 0;       // our own sequence counter
+            int expectedSeq = 1; 
+            int mySeq = 0;       
 
-            // Step 2: Send SYN-ACK
+            // Send SYN-ACK
             Segment synAck = new Segment();
             synAck.seqNum = mySeq;
             synAck.ackNum = expectedSeq;
-            synAck.timestamp = syn.timestamp; // echo sender's timestamp for RTT
+            synAck.timestamp = syn.timestamp; 
             synAck.dataLen = 0;
             synAck.syn = true;
             synAck.ack = true;
             sendTo(socket, peer, synAck);
-            mySeq = 1; // SYN consumed 1 byte
+            mySeq = 1; 
 
-            // Step 3: Receive data
+            // Receive data
             TreeMap<Integer, Segment> buffer = new TreeMap<>();
             ByteArrayOutputStream fileOut = new ByteArrayOutputStream();
             int finSeq = -1;
@@ -65,17 +67,17 @@ public class Receiver {
             mainLoop:
             while (true) {
                 RecvResult r = recvFrom(socket);
-                if (r == null) continue; // bad checksum
+                // bad checksum
+                if (r == null) continue; 
 
                 Segment seg = r.seg;
 
-                // Ignore pure ACKs from sender (e.g., 3rd handshake packet)
+                // Ignore pure ACKs from sender
                 if (!seg.syn && !seg.fin && seg.dataLen == 0) continue;
 
                 // Handle data
                 if (seg.dataLen > 0) {
                     if (seg.seqNum == expectedSeq) {
-                        // In-order: deliver immediately
                         fileOut.write(seg.data, 0, seg.data.length);
                         stats.dataBytes += seg.dataLen;
                         expectedSeq += seg.dataLen;
@@ -88,26 +90,24 @@ public class Receiver {
                             expectedSeq += buffered.dataLen;
                         }
                     } else if (seg.seqNum > expectedSeq) {
-                        // Out of order: buffer it (if not already)
                         if (!buffer.containsKey(seg.seqNum)) {
                             buffer.put(seg.seqNum, seg);
                             stats.outOfOrder++;
                         }
                     } else {
-                        // Old duplicate: nothing to do with data
                     }
                 }
 
-                // Handle FIN
+                // FIN
                 if (seg.fin) {
                     finSeq = seg.seqNum;
                 }
 
-                // Check if FIN is now in order (all data up to FIN delivered)
+                // Check if FIN is now in order
                 if (finSeq >= 0 && expectedSeq == finSeq) {
-                    expectedSeq++; // FIN consumes 1 byte
+                    expectedSeq++;
 
-                    // Send FIN+ACK
+                    // Send FIN + ACK
                     Segment finAck = new Segment();
                     finAck.seqNum = mySeq;
                     finAck.ackNum = expectedSeq;
@@ -117,16 +117,16 @@ public class Receiver {
                     finAck.ack = true;
                     sendTo(socket, peer, finAck);
 
-                    // Wait for final ACK from sender (retransmit FIN+ACK if needed)
+                    // Wait for final sender ACK 
                     for (int attempt = 0; attempt < MAX_RETRANS; attempt++) {
                         socket.setSoTimeout(timeoutEst.getMillis());
                         try {
                             RecvResult resp = recvFrom(socket);
                             if (resp != null && resp.seg.ack && !resp.seg.fin
                                     && resp.seg.ackNum == mySeq + 1) {
-                                break; // Got final ACK
+                                break;
                             }
-                            // Could be retransmitted FIN from sender — resend FIN+ACK
+            
                             if (resp != null && resp.seg.fin) {
                                 finAck.timestamp = resp.seg.timestamp;
                                 sendTo(socket, peer, finAck);
@@ -159,9 +159,6 @@ public class Receiver {
         stats.print();
     }
 
-    // -------------------------------------------------------------------------
-    // Send / Receive helpers
-    // -------------------------------------------------------------------------
 
     private void sendTo(DatagramSocket socket, InetSocketAddress peer, Segment seg)
             throws IOException {
@@ -173,7 +170,7 @@ public class Receiver {
         stats.packetsSent++;
     }
 
-    /** Returns null on bad checksum. Never returns null on timeout (throws instead). */
+    /** Returns null on bad checksum. Never returns null on timeout */
     private RecvResult recvFrom(DatagramSocket socket) throws IOException {
         byte[] buf = new byte[Segment.HEADER_SIZE + mtu + 64];
         DatagramPacket pkt = new DatagramPacket(buf, buf.length);
