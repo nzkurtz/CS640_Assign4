@@ -212,8 +212,13 @@ public class Sender {
                     consecutiveRetrans = 0;
                     dupAckCount = 0;
                     lastReceivedAckNum = ack.ackNum;
-                } else if (ack.ackNum == lastReceivedAckNum) {
-                    dupAckCount++;
+                } else if (ack.ackNum == base) {
+                    if (ack.ackNum == lastReceivedAckNum) {
+                        dupAckCount++;
+                    } else {
+                        dupAckCount = 1;
+                        lastReceivedAckNum = ack.ackNum;
+                    }
                     stats.dupAcks++;
                     if (dupAckCount == 3) {
                         // Fast retransmit: only the oldest in-flight
@@ -221,10 +226,8 @@ public class Sender {
                         stats.retransmissions++;
                     }
                 } else {
-                    dupAckCount = 0;
-                    lastReceivedAckNum = ack.ackNum;
+                    // ackNum < base: stale, ignore
                 }
-                // ackNum < base: stale, ignore
             }
         }
     }

@@ -93,8 +93,9 @@ public class Receiver {
                             buffer.put(seg.seqNum, seg);
                             stats.outOfOrder++;
                         }
+                    } else {
+                        // Old duplicate: nothing to do with data
                     }
-                    // seqNum < expectedSeq: duplicate, ignore
                 }
 
                 // Handle FIN
@@ -139,7 +140,7 @@ public class Receiver {
                     break mainLoop;
                 }
 
-                // Send cumulative ACK
+                // Send cumulative ACK for every valid packet
                 Segment ack = new Segment();
                 ack.seqNum = mySeq;
                 ack.ackNum = expectedSeq;
