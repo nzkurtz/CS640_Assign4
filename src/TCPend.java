@@ -1,67 +1,29 @@
-import java.util.HashMap;
-import java.util.Map;
-
-public final class TCPend {
-    private TCPend() {}
-
+public class TCPend {
     public static void main(String[] args) throws Exception {
-        Map<String, String> parsed = parseArgs(args);
+        int port = -1;
+        String remoteIP = null;
+        int remotePort = -1;
+        String filename = null;
+        int mtu = -1;
+        int sws = -1;
 
-        int port = requireInt(parsed, "-p");
-        int mtu = requireInt(parsed, "-m");
-        int sws = requireInt(parsed, "-c");
-        String fileName = require(parsed, "-f");
-
-        if (mtu <= 0) {
-            throw new IllegalArgumentException("MTU must be positive");
-        }
-        if (sws <= 0) {
-            throw new IllegalArgumentException("Sliding window size must be positive");
-        }
-
-        Logger logger = new Logger();
-        Stats stats = new Stats();
-
-        if (parsed.containsKey("-s")) {
-            String remoteIp = require(parsed, "-s");
-            int remotePort = requireInt(parsed, "-a");
-            Sender sender = new Sender(port, remoteIp, remotePort, fileName, mtu, sws, logger, stats);
-            sender.run();
-        } else {
-            Receiver receiver = new Receiver(port, fileName, mtu, sws, logger, stats);
-            receiver.run();
-        }
-    }
-
-    private static Map<String, String> parseArgs(String[] args) {
-        Map<String, String> parsed = new HashMap<>();
-        
         for (int i = 0; i < args.length; i++) {
-            String key = args[i];
-            if (!key.startsWith("-")) {
-                throw new IllegalArgumentException("Unexpected argument: " + key);
+            switch (args[i]) {
+                case "-p": port = Integer.parseInt(args[++i]); break;
+                case "-s": remoteIP = args[++i]; break;
+                case "-a": remotePort = Integer.parseInt(args[++i]); break;
+                case "-f": filename = args[++i]; break;
+                case "-m": mtu = Integer.parseInt(args[++i]); break;
+                case "-c": sws = Integer.parseInt(args[++i]); break;
             }
-            
-            if (i + 1 >= args.length) {
-                throw new IllegalArgumentException("Missing value for " + key);
-            }
-            parsed.put(key, args[++i]);
         }
-        
-        return parsed;
-    }
 
-    private static String require(Map<String, String> parsed, String key) {
-        String value = parsed.get(key);
-        
-        if (value == null) {
-            throw new IllegalArgumentException("Missing required argument " + key);
+        if (remoteIP != null) {
+            // Sender mode
+            new Sender(port, remoteIP, remotePort, filename, mtu, sws).run();
+        } else {
+            // Receiver mode
+            new Receiver(port, filename, mtu, sws).run();
         }
-        
-        return value;
-    }
-
-    private static int requireInt(Map<String, String> parsed, String key) {
-        return Integer.parseInt(require(parsed, key));
     }
 }

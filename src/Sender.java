@@ -2,314 +2,307 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.Arrays;
 
-public final class Sender {
-    private static final int MAX_RETRANSMISSIONS = 16;
-    private static final int RECEIVE_BUFFER_SIZE = 65535;
+public class Sender {
+    private static final int MAX_RETRANS = 16;
 
     private final int localPort;
-    private final String remoteIp;
+    private final String remoteHost;
     private final int remotePort;
-    private final String fileName;
     private final int mtu;
     private final int sws;
-    private final Logger logger;
-    private final Stats stats;
-    private final TimeoutEstimator timeoutEstimator;
+    private final String filename;
 
-    public Sender(int localPort, String remoteIp, int remotePort, String fileName, int mtu, int sws,
-                  Logger logger, Stats stats) {
+    private DatagramSocket socket;
+    private InetAddress destAddr;
+    private byte[] fileData;
+
+    private final Stats stats = new Stats();
+    private final Logger logger = new Logger();
+    private final TimeoutEstimator timeoutEst = new TimeoutEstimator();
+
+    // Sliding window state
+    private Segment[] win;
+    private byte[][] winBytes;
+    private long[] winTime;
+    private int winCount = 0;
+
+    private int base;     // oldest unACKed seq
+    private int nextSeq;  // next seq to send
+    private int dupAckCount = 0;
+    private int consecutiveRetrans = 0;
+    private int receiverSeq = 1; // receiver's next seq (after its SYN)
+
+    public Sender(int localPort, String remoteHost, int remotePort,
+                  String filename, int mtu, int sws) {
         this.localPort = localPort;
-        this.remoteIp = remoteIp;
+        this.remoteHost = remoteHost;
         this.remotePort = remotePort;
-        this.fileName = fileName;
+        this.filename = filename;
         this.mtu = mtu;
         this.sws = sws;
-        this.logger = logger;
-        this.stats = stats;
-        this.timeoutEstimator = new TimeoutEstimator();
     }
 
-    public void run() throws IOException {
-        byte[] fileBytes = Files.readAllBytes(Path.of(fileName));
-        InetAddress remoteAddress = InetAddress.getByName(remoteIp);
-        InetSocketAddress remoteSocketAddress = new InetSocketAddress(remoteAddress, remotePort);
+    public void run() throws Exception {
+        fileData = Files.readAllBytes(java.nio.file.Path.of(filename));
+        destAddr = InetAddress.getByName(remoteHost);
+        socket = new DatagramSocket(localPort);
+        win = new Segment[sws];
+        winBytes = new byte[sws][];
+        winTime = new long[sws];
 
-        try (DatagramSocket socket = new DatagramSocket(localPort)) {
-            socket.connect(remoteAddress, remotePort);
-            ConnectionState state = performHandshake(socket, remoteSocketAddress);
-            List<Segment> segments = buildDataSegments(fileBytes, state.localSeq, state.peerExpectedSeq);
-            sendFile(socket, remoteSocketAddress, segments, state);
-            int finSeq = state.localSeq;
-            Segment fin = Segment.create(finSeq, state.peerExpectedSeq, System.nanoTime(), false, true, false, null);
-            performClose(socket, remoteSocketAddress, fin);
+        try {
+            doSynHandshake();
+            doDataTransfer();
+            doFinHandshake();
+        } finally {
+            socket.close();
         }
-
-        System.out.println(stats.summaryLine());
+        stats.print();
     }
 
-    private ConnectionState performHandshake(DatagramSocket socket, InetSocketAddress remote) throws IOException {
-        Segment syn = Segment.create(0, 0, System.nanoTime(), true, false, false, null);
-        int attempts = 0;
+    // -------------------------------------------------------------------------
+    // Handshake
+    // -------------------------------------------------------------------------
 
-        while (attempts <= MAX_RETRANSMISSIONS) {
-            if (attempts > 0) {
-                stats.incrementRetransmissions();
+    private void doSynHandshake() throws IOException {
+        Segment syn = new Segment();
+        syn.seqNum = 0;
+        syn.ackNum = 0;
+        syn.timestamp = System.nanoTime();
+        syn.dataLen = 0;
+        syn.syn = true;
+
+        for (int attempt = 0; attempt <= MAX_RETRANS; attempt++) {
+            if (attempt > 0) {
+                stats.retransmissions++;
+                syn.timestamp = System.nanoTime();
             }
-            sendSegment(socket, remote, syn);
-            long deadline = System.nanoTime() + timeoutEstimator.currentTimeoutNanos();
+            sendSeg(syn);
 
+            long deadline = System.nanoTime() + timeoutEst.getNanos();
+            Segment resp = recvUntil(deadline);
+            if (resp != null && resp.syn && resp.ack) {
+                // Update RTT with SYN-ACK (timestamp was copied from SYN)
+                long rtt = System.nanoTime() - resp.timestamp;
+                if (rtt > 0) timeoutEst.update(rtt);
+
+                base = resp.ackNum;    // should be 1
+                nextSeq = resp.ackNum; // start data at seq 1
+
+                // Send ACK for the SYN-ACK
+                Segment ackSeg = new Segment();
+                ackSeg.seqNum = base;
+                ackSeg.ackNum = resp.seqNum + 1; // receiver's SYN consumed 1 byte
+                ackSeg.timestamp = System.nanoTime();
+                ackSeg.dataLen = 0;
+                ackSeg.ack = true;
+                receiverSeq = resp.seqNum + 1;
+                sendSeg(ackSeg);
+                return;
+            }
+        }
+        throw new RuntimeException("SYN handshake failed after " + MAX_RETRANS + " retransmissions");
+    }
+
+    private void doFinHandshake() throws IOException {
+        int finSeq = 1 + fileData.length; // seq right after last data byte
+
+        Segment fin = new Segment();
+        fin.seqNum = finSeq;
+        fin.ackNum = receiverSeq;
+        fin.timestamp = System.nanoTime();
+        fin.dataLen = 0;
+        fin.fin = true;
+
+        Segment finAck = null;
+        for (int attempt = 0; attempt <= MAX_RETRANS; attempt++) {
+            if (attempt > 0) {
+                stats.retransmissions++;
+                fin.timestamp = System.nanoTime();
+            }
+            sendSeg(fin);
+
+            long deadline = System.nanoTime() + timeoutEst.getNanos();
             while (System.nanoTime() < deadline) {
-                Segment response = receiveSegmentWithDeadline(socket, deadline);
-                if (response == null) {
+                Segment resp = recvUntil(deadline);
+                if (resp == null) break;
+                if (resp.fin && resp.ack && resp.ackNum == finSeq + 1) {
+                    finAck = resp;
                     break;
                 }
-                
-                if (!response.syn || !response.ack || response.ackNum != 1) {
-                    continue;
+                // Ignore other packets (stale ACKs etc.)
+            }
+            if (finAck != null) break;
+        }
+
+        if (finAck == null) {
+            throw new RuntimeException("FIN handshake failed");
+        }
+
+        // Send final ACK
+        Segment lastAck = new Segment();
+        lastAck.seqNum = finSeq + 1;
+        lastAck.ackNum = finAck.seqNum + 1;
+        lastAck.timestamp = System.nanoTime();
+        lastAck.dataLen = 0;
+        lastAck.ack = true;
+        sendSeg(lastAck);
+    }
+
+    // -------------------------------------------------------------------------
+    // Data transfer
+    // -------------------------------------------------------------------------
+
+    private void doDataTransfer() throws IOException {
+        int endSeq = 1 + fileData.length; // exclusive end / FIN seq
+
+        while (base < endSeq) {
+            // Fill window with new segments
+            while (winCount < sws && nextSeq < endSeq) {
+                int dataStart = nextSeq - 1;
+                int dataLen = Math.min(mtu, fileData.length - dataStart);
+                if (dataLen <= 0) break;
+
+                Segment seg = new Segment();
+                seg.seqNum = nextSeq;
+                seg.ackNum = receiverSeq;
+                seg.timestamp = System.nanoTime();
+                seg.dataLen = dataLen;
+                seg.ack = true;
+                seg.data = Arrays.copyOfRange(fileData, dataStart, dataStart + dataLen);
+
+                byte[] bytes = seg.toBytes();
+                win[winCount] = seg;
+                winBytes[winCount] = bytes;
+                winTime[winCount] = System.nanoTime();
+                winCount++;
+
+                sendRaw(bytes, seg);
+                stats.dataBytes += dataLen;
+                nextSeq += dataLen;
+            }
+
+            if (winCount == 0) break;
+
+            // Receive with deadline based on oldest in-flight send time
+            long deadline = winTime[0] + timeoutEst.getNanos();
+            Segment ack = recvUntil(deadline);
+
+            if (ack == null) {
+                // Timeout: retransmit all in-flight
+                consecutiveRetrans++;
+                if (consecutiveRetrans > MAX_RETRANS) {
+                    throw new RuntimeException("Max retransmissions exceeded");
                 }
-                int peerExpectedSeq = response.seqNum + response.consumedSequenceSpace();
-                timeoutEstimator.updateFromAck(response.ackNum, response.timestamp, System.nanoTime());
-                Segment finalAck = Segment.create(1, peerExpectedSeq, System.nanoTime(), false, false, true, null);
-                sendSegment(socket, remote, finalAck);
-                
-                return new ConnectionState(1, peerExpectedSeq);
-            }
-
-            attempts += 1;
-        }
-
-        throw new IOException("Handshake failed after maximum retransmissions");
-    }
-
-    private List<Segment> buildDataSegments(byte[] fileBytes, int startingSeq, int ackNum) {
-        List<Segment> segments = new ArrayList<>();
-        int offset = 0;
-        int seq = startingSeq;
-        while (offset < fileBytes.length) {
-            int length = Math.min(mtu, fileBytes.length - offset);
-            byte[] chunk = new byte[length];
-            System.arraycopy(fileBytes, offset, chunk, 0, length);
-            segments.add(Segment.create(seq, ackNum, 0L, false, false, true, chunk));
-            offset += length;
-            seq += length;
-        }
-        
-        return segments;
-    }
-
-    private void sendFile(DatagramSocket socket, InetSocketAddress remote, List<Segment> templates, ConnectionState state)
-            throws IOException {
-        Map<Integer, InFlightSegment> inFlight = new LinkedHashMap<>();
-        int nextIndex = 0;
-
-        while (nextIndex < templates.size() || !inFlight.isEmpty()) {
-            while (nextIndex < templates.size() && inFlight.size() < sws) {
-                Segment template = templates.get(nextIndex);
-                Segment live = Segment.create(
-                        template.seqNum,
-                        state.peerExpectedSeq,
-                        System.nanoTime(),
-                        false,
-                        false,
-                        true,
-                        template.data);
-                sendSegment(socket, remote, live);
-                stats.addDataBytes(live.length);
-                inFlight.put(live.seqNum, new InFlightSegment(live, System.nanoTime() + timeoutEstimator.currentTimeoutNanos()));
-                nextIndex += 1;
-            }
-
-            long deadline = earliestDeadline(inFlight);
-            Segment ack = receiveSegmentWithDeadline(socket, deadline);
-            if (ack != null) {
-                handleAck(socket, remote, ack, inFlight, state);
+                retransmitAll();
             } else {
-                long now = System.nanoTime();
-                for (InFlightSegment pending : inFlight.values()) {
-                    if (pending.deadlineNanos <= now) {
-                        retransmit(socket, remote, pending, state.peerExpectedSeq);
+                if (!ack.ack || ack.syn) continue; // ignore non-ACK and stale SYN-ACKs
+
+                // Update RTT
+                long rtt = System.nanoTime() - ack.timestamp;
+                if (rtt > 0 && rtt < 60_000_000_000L) timeoutEst.update(rtt);
+
+                if (ack.ackNum > base) {
+                    advanceWindow(ack.ackNum);
+                    consecutiveRetrans = 0;
+                    dupAckCount = 0;
+                } else if (ack.ackNum == base) {
+                    dupAckCount++;
+                    stats.dupAcks++;
+                    if (dupAckCount >= 3) {
+                        // Fast retransmit: only the oldest in-flight
+                        resend(0);
+                        stats.retransmissions++;
+                        dupAckCount = 0;
                     }
                 }
+                // ackNum < base: stale, ignore
             }
         }
+    }
 
-        if (templates.isEmpty()) {
-            state.localSeq = 1;
-        } else {
-            Segment last = templates.get(templates.size() - 1);
-            state.localSeq = last.seqNum + last.length;
+    private void advanceWindow(int newBase) {
+        int removed = 0;
+        while (removed < winCount) {
+            int segEnd = win[removed].seqNum + win[removed].dataLen;
+            if (segEnd <= newBase) removed++;
+            else break;
+        }
+        for (int i = 0; i < winCount - removed; i++) {
+            win[i] = win[i + removed];
+            winBytes[i] = winBytes[i + removed];
+            winTime[i] = winTime[i + removed];
+        }
+        winCount -= removed;
+        base = newBase;
+    }
+
+    private void retransmitAll() throws IOException {
+        for (int i = 0; i < winCount; i++) {
+            resend(i);
+            stats.retransmissions++;
         }
     }
 
-    private void handleAck(DatagramSocket socket, InetSocketAddress remote, Segment ack,
-                           Map<Integer, InFlightSegment> inFlight, ConnectionState state) throws IOException {
-        if (!ack.ack) {
-            return;
-        }
-
-        int ackNumber = ack.ackNum;
-        boolean advanced = false;
-
-        Iterator<Map.Entry<Integer, InFlightSegment>> iterator = inFlight.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<Integer, InFlightSegment> entry = iterator.next();
-            int endExclusive = entry.getKey() + entry.getValue().segment.length;
-            
-            if (ackNumber >= endExclusive) {
-                iterator.remove();
-                advanced = true;
-            }
-        }
-
-        if (advanced) {
-            timeoutEstimator.updateFromAck(ackNumber, ack.timestamp, System.nanoTime());
-            state.sendBase = ackNumber;
-            state.lastAckNumber = ackNumber;
-            state.duplicateAckStreak = 0;
-            
-            return;
-        }
-
-        if (ackNumber == state.lastAckNumber) {
-            state.duplicateAckStreak += 1;
-            stats.incrementDuplicateAcks();
-            if (state.duplicateAckStreak >= 3) {
-                InFlightSegment missing = inFlight.get(ackNumber);
-                
-                if (missing != null) {
-                    retransmit(socket, remote, missing, state.peerExpectedSeq);
-                    state.duplicateAckStreak = 0;
-                }
-            }
-        } else {
-            state.lastAckNumber = ackNumber;
-            state.duplicateAckStreak = 0;
-        }
+    private void resend(int idx) throws IOException {
+        win[idx].timestamp = System.nanoTime();
+        winBytes[idx] = win[idx].toBytes();
+        winTime[idx] = System.nanoTime();
+        sendRaw(winBytes[idx], win[idx]);
     }
 
-    private void retransmit(DatagramSocket socket, InetSocketAddress remote, InFlightSegment pending, int ackNum)
-            throws IOException {
-        if (pending.retransmissions >= MAX_RETRANSMISSIONS) {
-            throw new IOException("Segment exceeded maximum retransmissions");
+    // -------------------------------------------------------------------------
+    // Send / Receive helpers
+    // -------------------------------------------------------------------------
+
+    private void sendSeg(Segment seg) throws IOException {
+        sendRaw(seg.toBytes(), seg);
+    }
+
+    private void sendRaw(byte[] bytes, Segment seg) throws IOException {
+        DatagramPacket pkt = new DatagramPacket(bytes, bytes.length, destAddr, remotePort);
+        socket.send(pkt);
+        logger.log("snd", seg);
+        stats.packetsSent++;
+    }
+
+    /**
+     * Try to receive one well-formed segment. Returns null on bad checksum.
+     * Throws SocketTimeoutException if socket times out.
+     */
+    private Segment recvOnce() throws IOException {
+        byte[] buf = new byte[Segment.HEADER_SIZE + mtu + 64];
+        DatagramPacket pkt = new DatagramPacket(buf, buf.length);
+        socket.receive(pkt); // may throw SocketTimeoutException
+        int len = pkt.getLength();
+        if (!ChecksumUtil.verify(pkt.getData(), len)) {
+            stats.badChecksum++;
+            return null;
         }
-        Segment resent = Segment.create(
-                pending.segment.seqNum,
-                ackNum,
-                System.nanoTime(),
-                pending.segment.syn,
-                pending.segment.fin,
-                pending.segment.ack,
-                pending.segment.data);
-        pending.segment = resent;
-        pending.retransmissions += 1;
-        pending.deadlineNanos = System.nanoTime() + timeoutEstimator.currentTimeoutNanos();
-        stats.incrementRetransmissions();
-        sendSegment(socket, remote, resent);
+        Segment seg = Segment.fromBytes(pkt.getData(), len);
+        logger.log("rcv", seg);
+        stats.packetsReceived++;
+        return seg;
     }
 
-    private long earliestDeadline(Map<Integer, InFlightSegment> inFlight) {
-        long fallback = System.nanoTime() + timeoutEstimator.currentTimeoutNanos();
-        long earliest = fallback;
-        for (InFlightSegment pending : inFlight.values()) {
-            earliest = Math.min(earliest, pending.deadlineNanos);
-        }
-        
-        return earliest;
-    }
-
-    private void performClose(DatagramSocket socket, InetSocketAddress remote, Segment fin)
-            throws IOException {
-        int attempts = 0;
-        int finSeq = fin.seqNum;
-
-        while (attempts <= MAX_RETRANSMISSIONS) {
-            if (attempts > 0) {
-                stats.incrementRetransmissions();
-            }
-            sendSegment(socket, remote, fin);
-            long deadline = System.nanoTime() + timeoutEstimator.currentTimeoutNanos();
-
-            while (System.nanoTime() < deadline) {
-                Segment response = receiveSegmentWithDeadline(socket, deadline);
-                if (response == null) {
-                    break;
-                }
-                
-                if (response.fin && response.ack && response.ackNum == finSeq + 1) {
-                    int peerFinalSeq = response.seqNum + response.consumedSequenceSpace();
-                    Segment finalAck = Segment.create(finSeq + 1, peerFinalSeq, System.nanoTime(), false, false, true, null);
-                    sendSegment(socket, remote, finalAck);
-                    return;
-                }
-            }
-
-            attempts += 1;
-        }
-
-        throw new IOException("Connection close failed after maximum retransmissions");
-    }
-
-    private void sendSegment(DatagramSocket socket, InetSocketAddress remote, Segment segment) throws IOException {
-        byte[] bytes = segment.toBytes();
-        DatagramPacket packet = new DatagramPacket(bytes, bytes.length, remote);
-        socket.send(packet);
-        logger.logSend(segment);
-        stats.incrementPackets();
-    }
-
-    private Segment receiveSegmentWithDeadline(DatagramSocket socket, long deadlineNanos) throws IOException {
+    /** Receive a valid segment before deadlineNs. Returns null on timeout. */
+    private Segment recvUntil(long deadlineNs) throws IOException {
         while (true) {
-            long remainingNs = deadlineNanos - System.nanoTime();
-            
-            if (remainingNs <= 0) {
+            long remaining = deadlineNs - System.nanoTime();
+            if (remaining <= 0) return null;
+            int ms = (int) Math.max(1, remaining / 1_000_000);
+            socket.setSoTimeout(ms);
+            try {
+                Segment seg = recvOnce();
+                if (seg != null) return seg;
+                // Bad checksum: retry within deadline
+            } catch (SocketTimeoutException e) {
                 return null;
             }
-            int timeoutMs = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, (remainingNs + 999_999L) / 1_000_000L));
-            socket.setSoTimeout(timeoutMs);
-            DatagramPacket packet = new DatagramPacket(new byte[RECEIVE_BUFFER_SIZE], RECEIVE_BUFFER_SIZE);
-            
-            try {
-                socket.receive(packet);
-            } catch (java.net.SocketTimeoutException e) {
-                return null;
-            }
-
-            if (!Segment.verifyChecksum(packet.getData(), packet.getLength())) {
-                stats.incrementChecksumDiscarded();
-                continue;
-            }
-
-            Segment segment;
-            try {
-                segment = Segment.fromDatagram(packet.getData(), packet.getLength());
-            } catch (IllegalArgumentException e) {
-                continue;
-            }
-            logger.logReceive(segment);
-            stats.incrementPackets();
-            
-            return segment;
-        }
-    }
-
-    private static final class InFlightSegment {
-        private Segment segment;
-        private int retransmissions;
-        private long deadlineNanos;
-
-        private InFlightSegment(Segment segment, long deadlineNanos) {
-            this.segment = segment;
-            this.retransmissions = 0;
-            this.deadlineNanos = deadlineNanos;
         }
     }
 }
