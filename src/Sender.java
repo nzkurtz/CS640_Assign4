@@ -204,11 +204,10 @@ public class Sender {
             } else {
                 if (!ack.ack || ack.syn) continue; // ignore non-ACK and stale SYN-ACKs
 
-                // Update timeout estimator
-                long now = System.nanoTime();
-                timeoutEst.update(ack.ackNum, ack.timestamp, now);
-
                 if (ack.ackNum > base) {
+                    // Update timeout estimator only on new ACKs
+                    long now = System.nanoTime();
+                    timeoutEst.update(ack.ackNum, ack.timestamp, now);
                     advanceWindow(ack.ackNum);
                     consecutiveRetrans = 0;
                     dupAckCount = 0;
