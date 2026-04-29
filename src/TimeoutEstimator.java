@@ -1,30 +1,32 @@
 public class TimeoutEstimator {
-    private static final double A = 0.875;
-    private static final double B = 0.75;
-    private static final long INITIAL_NS = 5_000_000_000L;
+    private static final double a = 0.875;
+    private static final double b = 0.75;
 
-    private boolean first = true;
-    private double ertt;
-    private double edev;
-    private long timeoutNs = INITIAL_NS;
+    private double ertt = 0;
+    private double edev = 0;
 
-    public void update(long rttNs) {
-        if (first) {
-            ertt = rttNs;
+    private long timeoutNs = 5_000_000_000L;
+
+    // C = current time, T = echoed timestamp, S = sequence number
+    public void update(int S, long T, long C) {
+        if (S == 0) {
+            ertt = (C - T);
             edev = 0;
             timeoutNs = (long) (2 * ertt);
-            first = false;
         } else {
-            double srtt = rttNs;
+            double srtt = (C - T);
             double sdev = Math.abs(srtt - ertt);
-            ertt = A * ertt + (1 - A) * srtt;
-            edev = B * edev + (1 - B) * sdev;
+            ertt = a * ertt + (1 - a) * srtt;
+            edev = b * edev + (1 - b) * sdev;
             timeoutNs = (long) (ertt + 4 * edev);
         }
-        if (timeoutNs < 1_000_000) timeoutNs = 1_000_000; // minimum 1ms
     }
 
-    public long getNanos() { return timeoutNs; }
+    public long getNanos() {
+        return Math.max(timeoutNs, 15_000_000L);
+    }
 
-    public int getMillis() { return (int) Math.max(1, timeoutNs / 1_000_000); }
+    public int getMillis() {
+        return (int) Math.max(1, getNanos() / 1_000_000);
+    }
 }

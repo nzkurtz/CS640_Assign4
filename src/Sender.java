@@ -33,6 +33,7 @@ public class Sender {
     private int base;     // oldest unACKed seq
     private int nextSeq;  // next seq to send
     private int dupAckCount = 0;
+    private int lastReceivedAckNum = -1;
     private int consecutiveRetrans = 0;
     private int receiverSeq = 1; // receiver's next seq (after its SYN)
 
@@ -86,9 +87,9 @@ public class Sender {
             long deadline = System.nanoTime() + timeoutEst.getNanos();
             Segment resp = recvUntil(deadline);
             if (resp != null && resp.syn && resp.ack) {
-                // Update RTT with SYN-ACK (timestamp was copied from SYN)
-                long rtt = System.nanoTime() - resp.timestamp;
-                if (rtt > 0) timeoutEst.update(rtt);
+                // Update timeout estimator using SYN-ACK echo
+                long now = System.nanoTime();
+                timeoutEst.update(0, resp.timestamp, now);
 
                 base = resp.ackNum;    // should be 1
                 nextSeq = resp.ackNum; // start data at seq 1
@@ -102,6 +103,7 @@ public class Sender {
                 ackSeg.ack = true;
                 receiverSeq = resp.seqNum + 1;
                 sendSeg(ackSeg);
+                lastReceivedAckNum = base;
                 return;
             }
         }
@@ -202,23 +204,26 @@ public class Sender {
             } else {
                 if (!ack.ack || ack.syn) continue; // ignore non-ACK and stale SYN-ACKs
 
-                // Update RTT
-                long rtt = System.nanoTime() - ack.timestamp;
-                if (rtt > 0 && rtt < 60_000_000_000L) timeoutEst.update(rtt);
+                // Update timeout estimator
+                long now = System.nanoTime();
+                timeoutEst.update(ack.ackNum, ack.timestamp, now);
 
                 if (ack.ackNum > base) {
                     advanceWindow(ack.ackNum);
                     consecutiveRetrans = 0;
                     dupAckCount = 0;
-                } else if (ack.ackNum == base) {
+                    lastReceivedAckNum = ack.ackNum;
+                } else if (ack.ackNum == lastReceivedAckNum) {
                     dupAckCount++;
                     stats.dupAcks++;
-                    if (dupAckCount >= 3) {
+                    if (dupAckCount == 3) {
                         // Fast retransmit: only the oldest in-flight
                         resend(0);
                         stats.retransmissions++;
-                        dupAckCount = 0;
                     }
+                } else {
+                    dupAckCount = 0;
+                    lastReceivedAckNum = ack.ackNum;
                 }
                 // ackNum < base: stale, ignore
             }
